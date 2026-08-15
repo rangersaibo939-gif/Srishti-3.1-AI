@@ -1,0 +1,6 @@
+{
+  "name": "Srishti 3.0 AI Companion & Agent",
+  "description": "Next-generation multi-modal on-device AI companion and Android device agent with Kotlin, Jetpack Compose, PersonalityEngine, MemoryEngine, VoiceEngine, and llama.cpp native inference.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

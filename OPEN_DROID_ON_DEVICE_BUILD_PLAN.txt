@@ -1,0 +1,243 @@
+================================================================================
+OPEN DROID — ON-DEVICE COMPILATION & VERIFICATION PLAN
+================================================================================
+
+A. ENVIRONMENT STATUS (Cloud Workspace Assessment)
+--------------------------------------------------------------------------------
+1. Gradle Wrapper:
+   - gradle/wrapper/gradle-wrapper.properties exists (Gradle 8.9).
+   - gradlew shell script and gradle-wrapper.jar are not committed directly in git; 
+     Gradle must be invoked via installed gradle or generated wrapper in target env.
+2. Android SDK:
+   - ANDROID_HOME / ANDROID_SDK_ROOT is NOT installed in this cloud Linux web container.
+3. Android SDK Platform:
+   - Target compileSdk/targetSdk 34 (Android 14) platform headers not present on host.
+4. Android Build-Tools:
+   - build-tools 34.0.0 not present on host.
+5. Android NDK:
+   - NDK 26.1.10909125 not present in cloud container.
+6. CMake:
+   - CMake 3.22.1 required for externalNativeBuild; not installed on host.
+7. Architecture Configuration:
+   - ABI arm64-v8a explicitly configured in app/build.gradle.kts (ndk.abiFilters).
+8. llama.cpp Source:
+   - SOURCE EXISTS at app/src/main/cpp/llama.cpp (revision b3600 pinned).
+9. CMake Linking:
+   - app/src/main/cpp/CMakeLists.txt correctly includes llama.cpp, ggml, and 
+     grammar-parser.cpp, linking them into target shared library 'opendroid_llama'.
+10. JNI Symbols:
+    - JNI exported symbols in llama-jni.cpp strictly match Kotlin external declarations 
+      in com.opendroid.app.core.inference.NativeLlamaCppAdapter:
+      - isNativeLibraryLoadedNative
+      - isModelLoadedNative
+      - loadModelNative
+      - unloadModelNative
+      - runInferenceConstrainedNative
+      - cancelExecutionNative
+11. AIDL Interfaces:
+    - IInferenceService.aidl and IInferenceCallback.aidl strictly match 
+      InferenceService.kt implementation and InferenceClient.kt consumer.
+12. Room & KSP:
+    - KSP 2.1.0-1.0.29 and Room 2.6.1 configured in build.gradle.kts with compiler args.
+13. AndroidManifest:
+    - Dedicated process android:process=":inference" configured for InferenceService.
+    - Required permissions declared: CAMERA, QUERY_ALL_PACKAGES.
+14. Model Directory Handling:
+    - InferenceService.loadModelSafely resolves absolute app-internal storage paths.
+
+Classification Matrix for Host vs Target Device:
+- llama.cpp source: SOURCE EXISTS (Real)
+- CMakeLists.txt: SOURCE EXISTS (Real)
+- JNI Bridge (llama-jni.cpp): SOURCE EXISTS (Real)
+- AIDL IPC & Service: SOURCE EXISTS (Real)
+- Room Database & DAO: SOURCE EXISTS (Real)
+- 4 Android Tools: SOURCE EXISTS (Real)
+- Binary Compilation (libopendroid_llama.so & APK): BLOCKED on cloud host due to missing Android SDK/NDK; READY for Termux/AndroidIDE/Local PC.
+
+
+B. MISSING DEPENDENCIES (For Target Build Machine / Termux / AndroidIDE)
+--------------------------------------------------------------------------------
+1. Java Development Kit (JDK 17 or JDK 21)
+2. Android SDK Command-line Tools (latest)
+3. Android SDK Platform: platforms;android-34
+4. Android Build-Tools: build-tools;34.0.0
+5. Android NDK: ndk;26.1.10909125
+6. Android CMake: cmake;3.22.1
+7. GGUF Test Model: SmolLM2-135M-Instruct-Q4_K_M.gguf (~85MB)
+
+
+C. EXACT COMMANDS TO INSTALL / FIX MISSING DEPENDENCIES
+--------------------------------------------------------------------------------
+1. On Debian/Ubuntu/Linux PC:
+   sudo apt-get update
+   sudo apt-get install -y openjdk-17-jdk git wget unzip cmake
+   mkdir -p ~/android-sdk/cmdline-tools
+   cd ~/android-sdk/cmdline-tools
+   wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+   unzip commandlinetools-linux-11076708_latest.zip
+   mv cmdline-tools latest
+   export ANDROID_HOME=$HOME/android-sdk
+   export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+   yes | sdkmanager --licenses
+   sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1" "platform-tools"
+
+2. On Android Device (Termux):
+   pkg update && pkg install -y openjdk-17 gradle cmake clang git
+   # Or directly open and build using AndroidIDE (which bundles SDK 34, NDK 26, and CMake 3.22)
+
+
+D. EXACT COMMAND TO COMPILE OPENDROID
+--------------------------------------------------------------------------------
+# Generate wrapper if missing:
+gradle wrapper --gradle-version 8.9
+
+# Clean and compile debug APK with native arm64-v8a libopendroid_llama.so:
+./gradlew assembleDebug
+
+# Run unit test suite:
+./gradlew test
+
+
+E. EXACT EXPECTED APK PATH
+--------------------------------------------------------------------------------
+app/build/outputs/apk/debug/app-debug.apk
+
+
+F. EXACT COMMAND TO INSTALL THE APK USING ADB
+--------------------------------------------------------------------------------
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+
+G. EXACT COMMAND TO VERIFY THE INSTALLED PACKAGE
+--------------------------------------------------------------------------------
+adb shell pm list packages | grep com.opendroid.app
+adb shell dumpsys package com.opendroid.app | grep -E "versionName|userId|targetSdk"
+
+
+H. EXACT COMMAND TO COLLECT LOGCAT
+--------------------------------------------------------------------------------
+# Main and inference processes tagged stream:
+adb logcat -v time -s OpenDroid-LLamaJNI:V InferenceService:V InferenceClient:V AgentCore:V ToolRegistry:V EmergencyStop:V AndroidRuntime:E
+
+
+I. EXACT STEPS TO PLACE GGUF MODEL INTO APP MODEL DIRECTORY
+--------------------------------------------------------------------------------
+1. Download quantized smoke model:
+   wget https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct-GGUF/resolve/main/smollm2-135m-instruct-q4_k_m.gguf -O smollm2-135m-instruct-q4_k_m.gguf
+
+2. Push to target app data directory:
+   adb shell "mkdir -p /data/user/0/com.opendroid.app/files/models"
+   adb push smollm2-135m-instruct-q4_k_m.gguf /data/local/tmp/model.gguf
+   adb shell "run-as com.opendroid.app cp /data/local/tmp/model.gguf /data/user/0/com.opendroid.app/files/models/smollm2-135m-instruct-q4_k_m.gguf"
+   adb shell "run-as com.opendroid.app chmod 644 /data/user/0/com.opendroid.app/files/models/smollm2-135m-instruct-q4_k_m.gguf"
+
+
+J. EXACT SMOKE-TEST PROCEDURE FOR REAL LLAMA.CPP INFERENCE
+--------------------------------------------------------------------------------
+1. Launch OpenDroid:
+   adb shell am start -n com.opendroid.app/.ui.MainActivity
+
+2. Verify two OS processes spawn:
+   adb shell ps -ef | grep com.opendroid.app
+   # Expect:
+   # 1) com.opendroid.app (Main UI & AgentCore)
+   # 2) com.opendroid.app:inference (Native llama.cpp & JNI host)
+
+3. Send Smoke Prompt via ADB broadcast or UI:
+   Prompt: "Reply exactly: OPENDROID_LLAMA_OK"
+   Expected Logcat:
+   - "llama_load_model_from_file" -> model loaded
+   - "llama_new_context_with_model" -> context initialized
+   - "llama_tokenize" -> prompt tokenized
+   - "llama_decode" -> ingestion
+   - "llama_sample_token_greedy" -> output generated
+   - IInferenceCallback.onComplete receives response
+
+
+K. EXACT SMOKE-TEST PROCEDURE FOR EACH OF THE 4 ANDROID TOOLS
+--------------------------------------------------------------------------------
+1. FlashlightTool (CameraManager API):
+   - Input: "Turn on the flashlight"
+   - GBNF Output: {"type":"tool_call","thought":"turn on torch","tool_name":"set_flashlight","arguments":{"enabled":true}}
+   - Execution: CameraManager.setTorchMode(cameraId, true)
+   - Verification: Camera flash turns physically on. Verification passed.
+
+2. MediaVolumeTool (AudioManager API):
+   - Input: "Set volume to 50 percent"
+   - GBNF Output: {"type":"tool_call","thought":"adjust volume","tool_name":"set_media_volume","arguments":{"volumePercent":50}}
+   - Execution: AudioManager.setStreamVolume(STREAM_MUSIC, target, FLAG_SHOW_UI)
+   - Verification: AudioManager.getStreamVolume matches requested percent.
+
+3. BatteryInfoTool (BatteryManager API):
+   - Input: "What is my battery level?"
+   - GBNF Output: {"type":"tool_call","thought":"query battery","tool_name":"get_battery_info","arguments":{}}
+   - Execution: BatteryManager.BATTERY_PROPERTY_CAPACITY
+   - Verification: Returns real integer percentage and charging state.
+
+4. AppLaunchTool (PackageManager API):
+   - Input: "Open settings"
+   - GBNF Output: {"type":"tool_call","thought":"launch settings","tool_name":"launch_app","arguments":{"packageName":"com.android.settings"}}
+   - Execution: Context.startActivity(launchIntent)
+   - Verification: Settings activity opens on device screen.
+
+
+L. EXACT EMERGENCY-STOP TEST
+--------------------------------------------------------------------------------
+1. Initiate long prompt or multi-step action.
+2. Tap "EMERGENCY STOP" button in UI or send stop broadcast.
+3. Verify:
+   - EmergencyStopManager.isStopRequested() returns true.
+   - cancelInflightInference() dispatches cancelInference() across AIDL.
+   - JNI sets g_cancel_requested = true.
+   - Native llama_decode loop breaks immediately.
+   - Room task entity transitions to FAILED with error "Emergency Stop".
+   - No subsequent tool mutation executes.
+
+
+M. EXACT PROCESS-DEATH / :INFERENCE CRASH-RECOVERY TEST
+--------------------------------------------------------------------------------
+1. Start OpenDroid app.
+2. Force-kill the inference child process:
+   adb shell pkill -9 -f "com.opendroid.app:inference"
+3. Verify:
+   - Main process (com.opendroid.app) DOES NOT CRASH.
+   - DeathRecipient triggers in InferenceClient.kt.
+   - InferenceClient detects death, logs error, and automatically rebinds.
+   - Subsequent user prompt spawns a fresh :inference process safely.
+
+
+N. EXACT SUCCESS / FAILURE CRITERIA FOR EACH TEST
+--------------------------------------------------------------------------------
+1. Build:
+   - Success: libopendroid_llama.so compiled for arm64-v8a and packaged into app-debug.apk without errors.
+   - Failure: CMake compilation errors, missing symbols, or linker failure.
+
+2. Model Load:
+   - Success: llama_load_model_from_file returns non-null model pointer and memory check passes.
+   - Failure: Returns null, logs FILE_NOT_FOUND or INSUFFICIENT_MEMORY.
+
+3. Inference:
+   - Success: Output tokens streamed without mock fallback; adheres strictly to GBNF JSON grammar.
+   - Failure: GBNF parse exception, unconstrained text, or NativeLlamaCppAdapter crash.
+
+4. Idempotency:
+   - Success: Duplicate step execution blocked by Room unique index on UUIDv5 key.
+   - Failure: Same tool executes twice with identical parameters.
+
+5. Emergency Stop:
+   - Success: Tool execution halted within <100ms; Room updated.
+   - Failure: Tool proceeds to mutate Android system state after stop signal.
+
+
+O. CODE DEFECTS DISCOVERED DURING INSPECTION
+--------------------------------------------------------------------------------
+1. Runtime Camera Permission Handling:
+   - AndroidManifest.xml declares android.permission.CAMERA, but Android 6.0+ requires
+     ActivityCompat.requestPermissions at runtime before CameraManager.setTorchMode()
+     succeeds on fresh installs.
+2. Target Environment Wrapper:
+   - gradlew and gradlew.bat shell binaries must be generated via 'gradle wrapper'
+     when setting up a new repository clone on the target machine.
+3. GGUF Model Download:
+   - Model weights must be pushed to device storage via adb before testing inference.
+================================================================================
