@@ -4,14 +4,16 @@ project("opendroid_llama" C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Configure arm64-v8a optimization flags
-if(${ANDROID_ABI} STREQUAL "arm64-v8a")
-    add_definitions(-D__ARM_NEON)
-    add_definitions(-D__ARM_FEATURE_DOTPROD)
-    add_definitions(-D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
-    # The macro above only advertises the feature; Clang also needs the
-    # actual architecture feature enabled for vdotq_s32 intrinsics.
-    add_compile_options(-march=armv8.2-a+dotprod)
+# Configure arm64-v8a optimization flags.
+#
+# llama.cpp/ggml uses ARM FP16 vector intrinsics (vfmaq_f16/vaddq_f16/
+# vmulq_f16) when Clang advertises __ARM_FEATURE_FP16_VECTOR_ARITHMETIC.
+# Do not define ARM feature macros manually: they must come from the
+# compiler's actual target features. armv8.2-a+fp16 enables Clang's
+# fullfp16 target feature, while +dotprod enables the ARM dot-product
+# intrinsics used by ggml.
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    add_compile_options(-march=armv8.2-a+dotprod+fp16)
 endif()
 
 # Configure llama.cpp build for embedded Android arm64
