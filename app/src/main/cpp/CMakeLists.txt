@@ -9,6 +9,9 @@ if(${ANDROID_ABI} STREQUAL "arm64-v8a")
     add_definitions(-D__ARM_NEON)
     add_definitions(-D__ARM_FEATURE_DOTPROD)
     add_definitions(-D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+    # The macro above only advertises the feature; Clang also needs the
+    # actual architecture feature enabled for vdotq_s32 intrinsics.
+    add_compile_options(-march=armv8.2-a+dotprod)
 endif()
 
 # Configure llama.cpp build for embedded Android arm64
