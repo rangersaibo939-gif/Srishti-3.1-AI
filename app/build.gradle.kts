@@ -18,6 +18,9 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // Pin the native toolchain to the NDK version installed by CI.
+        ndkVersion = "26.1.10909125"
+
         ndk {
             abiFilters.addAll(setOf("arm64-v8a"))
         }
