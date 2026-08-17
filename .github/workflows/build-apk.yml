@@ -35,6 +35,12 @@ jobs:
           unzip -q /tmp/gradle.zip -d "$HOME/gradle"
           echo "$HOME/gradle/gradle-8.9/bin" >> "$GITHUB_PATH"
 
+      - name: Restore complete llama.cpp b3600 source
+        run: |
+          rm -rf app/src/main/cpp/llama.cpp
+          git clone --depth 1 --branch b3600 https://github.com/ggerganov/llama.cpp.git app/src/main/cpp/llama.cpp
+          test -f app/src/main/cpp/llama.cpp/CMakeLists.txt
+
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace --no-daemon
 
