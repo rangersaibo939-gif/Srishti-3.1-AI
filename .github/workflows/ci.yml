@@ -1,0 +1,43 @@
+name: Srishti CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+      - name: Install Gradle 8.9
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle"
+          unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-8.9/bin" >> "$GITHUB_PATH"
+      - name: Restore complete llama.cpp b3600 source
+        run: |
+          rm -rf app/src/main/cpp/llama.cpp
+          git clone --depth 1 --branch b3600 https://github.com/ggerganov/llama.cpp.git app/src/main/cpp/llama.cpp
+          test -f app/src/main/cpp/llama.cpp/CMakeLists.txt
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace --no-daemon
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Srishti-3.1-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
