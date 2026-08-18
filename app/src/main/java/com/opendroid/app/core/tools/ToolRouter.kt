@@ -1,7 +1,9 @@
 package com.opendroid.app.core.tools
 
 import android.content.Context
+import com.google.gson.Gson
 import com.opendroid.app.core.domain.RiskLevel
+import com.opendroid.app.core.domain.TaskStatus
 import com.opendroid.app.core.domain.ToolExecutionResult
 import com.opendroid.app.core.logging.RedactedLogger
 import com.opendroid.app.core.security.UUIDv5
@@ -9,7 +11,6 @@ import com.opendroid.app.core.task.EmergencyStopManager
 import com.opendroid.app.core.task.IdempotencyEngine
 import com.opendroid.app.data.database.TaskDao
 import com.opendroid.app.data.database.TaskStepEntity
-import com.opendroid.app.data.database.TaskStepStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -22,16 +23,12 @@ data class ToolRoutingOutcome(
     val errorMessage: String? = null
 )
 
-/**
- * Tool Router for Srishti 3.0
- * Validates, policies, deduplicates via UUIDv5, and executes Android native tools.
- */
+/** Safe, durable gateway between Srishti's reasoning layer and Android tools. */
 class ToolRouter(
     private val context: Context,
     private val taskDao: TaskDao,
     private val toolPolicy: ToolPolicy = ToolPolicy()
 ) {
-
     suspend fun routeAndExecute(
         taskId: String,
         stepIndex: Int,
@@ -39,111 +36,59 @@ class ToolRouter(
         arguments: Map<String, Any?>,
         onConfirmationNeeded: (suspend (reason: String) -> Boolean)? = null
     ): ToolRoutingOutcome = withContext(Dispatchers.IO) {
-        if (EmergencyStopManager.isStopRequested()) {
-            return@withContext ToolRoutingOutcome(
-                success = false,
-                toolName = toolName,
-                result = null,
-                policyResult = PolicyEvaluationResult(false, false, "Emergency stop active", RiskLevel.BLOCKED),
-                errorMessage = "Emergency stop was activated."
-            )
-        }
+        if (EmergencyStopManager.isStopRequested()) return@withContext blocked(toolName, "Emergency stop was activated.")
 
         val tool = ToolRegistry.getTool(toolName)
-        if (tool == null) {
-            RedactedLogger.w(TAG, "Unrecognized tool: $toolName")
-            return@withContext ToolRoutingOutcome(
-                success = false,
-                toolName = toolName,
-                result = null,
-                policyResult = PolicyEvaluationResult(false, false, "Tool not registered", RiskLevel.BLOCKED),
-                errorMessage = "Tool '$toolName' is not registered or supported."
-            )
+            ?: return@withContext blocked(toolName, "Tool '$toolName' is not registered or supported.")
+        val validation = tool.validate(arguments)
+        if (validation.isFailure) {
+            val reason = validation.exceptionOrNull()?.message ?: "Validation failed"
+            return@withContext ToolRoutingOutcome(false, toolName, null,
+                PolicyEvaluationResult(false, false, reason, tool.riskTier),
+                "Invalid parameters for '$toolName': $reason")
         }
 
-        // Schema validation
-        val validationResult = tool.validate(arguments)
-        if (validationResult.isFailure) {
-            val err = validationResult.exceptionOrNull()?.message ?: "Validation failed"
-            RedactedLogger.e(TAG, "Argument validation failed for $toolName: $err")
-            return@withContext ToolRoutingOutcome(
-                success = false,
-                toolName = toolName,
-                result = null,
-                policyResult = PolicyEvaluationResult(false, false, err, tool.riskTier),
-                errorMessage = "Invalid parameters for '$toolName': $err"
-            )
-        }
-
-        // Policy evaluation
         val policy = toolPolicy.evaluatePolicy(tool, arguments)
-        if (!policy.isAllowed) {
-            return@withContext ToolRoutingOutcome(
-                success = false,
-                toolName = toolName,
-                result = null,
-                policyResult = policy,
-                errorMessage = "Tool execution blocked: ${policy.reason}"
-            )
+        if (!policy.isAllowed) return@withContext ToolRoutingOutcome(false, toolName, null, policy, "Tool execution blocked: ${policy.reason}")
+        if (policy.requiresUserConfirmation) {
+            val approved = onConfirmationNeeded?.invoke(policy.reason) ?: false
+            if (!approved) return@withContext ToolRoutingOutcome(false, toolName, null, policy, "User declined permission for $toolName.")
         }
 
-        // User confirmation if required
-        if (policy.requiresUserConfirmation && onConfirmationNeeded != null) {
-            val approved = onConfirmationNeeded(policy.reason)
-            if (!approved) {
-                return@withContext ToolRoutingOutcome(
-                    success = false,
-                    toolName = toolName,
-                    result = null,
-                    policyResult = policy,
-                    errorMessage = "User declined permission for $toolName."
-                )
-            }
-        }
-
-        // Idempotency tracking
         val canonicalArgs = IdempotencyEngine.canonicalizeJson(arguments)
         val idempotencyKey = UUIDv5.generateStepKey(taskId, stepIndex, toolName, canonicalArgs)
-        val stepEntity = TaskStepEntity(
+        val step = TaskStepEntity(
             taskId = taskId,
             stepIndex = stepIndex,
             toolName = toolName,
             argumentsJson = canonicalArgs,
             idempotencyKey = idempotencyKey,
-            status = TaskStepStatus.EXECUTING
+            riskTier = tool.riskTier,
+            status = TaskStatus.EXECUTING
         )
-        taskDao.insertStep(stepEntity)
-
-        // Execution with timeout
-        val execResult = withTimeoutOrNull(tool.timeoutMs) {
-            tool.execute(context, arguments)
-        } ?: ToolExecutionResult(
-            success = false,
-            data = emptyMap(),
-            errorMessage = "Tool '$toolName' timed out after ${tool.timeoutMs}ms"
-        )
-
-        // Post-execution verification
-        if (execResult.success) {
-            val verified = tool.verify(context, arguments, execResult)
-            if (!verified) {
-                RedactedLogger.w(TAG, "Tool verification warning: OS state may not match intended mutation")
-            }
-            taskDao.updateStepStatus(taskId, stepIndex, TaskStepStatus.COMPLETED, execResult.data.toString())
-        } else {
-            taskDao.updateStepStatus(taskId, stepIndex, TaskStepStatus.FAILED, execResult.errorMessage)
+        if (taskDao.insertStep(step) == -1L) {
+            val existing = taskDao.getStepByIdempotencyKey(idempotencyKey)
+            return@withContext ToolRoutingOutcome(existing?.status == TaskStatus.COMPLETED, toolName, null, policy, "Duplicate action suppressed by idempotency key.")
         }
 
+        val execResult = withTimeoutOrNull(tool.timeoutMs) { tool.execute(context, arguments) }
+            ?: ToolExecutionResult(success = false, error = "Tool '$toolName' timed out after ${tool.timeoutMs}ms")
+        val verified = execResult.success && tool.verify(context, arguments, execResult)
+        val finalStatus = if (execResult.success && verified) TaskStatus.COMPLETED else TaskStatus.FAILED
+        taskDao.updateStepStatus(idempotencyKey, finalStatus, Gson().toJson(execResult), verified)
+        if (!verified && execResult.success) RedactedLogger.w(TAG, "Tool verification failed for $toolName")
+
         ToolRoutingOutcome(
-            success = execResult.success,
+            success = execResult.success && verified,
             toolName = toolName,
             result = execResult,
             policyResult = policy,
-            errorMessage = execResult.errorMessage
+            errorMessage = if (execResult.success && verified) null else (execResult.error ?: "Post-execution verification failed.")
         )
     }
 
-    companion object {
-        private const val TAG = "SrishtiToolRouter"
-    }
+    private fun blocked(toolName: String, message: String) = ToolRoutingOutcome(false, toolName, null,
+        PolicyEvaluationResult(false, false, message, RiskLevel.BLOCKED), message)
+
+    companion object { private const val TAG = "SrishtiToolRouter" }
 }
